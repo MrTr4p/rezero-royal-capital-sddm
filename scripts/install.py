@@ -15,45 +15,59 @@ SOURCE = ROOT / 'theme'
 NAME = 'rezero-royal-capital'
 DEST = Path('/usr/share/sddm/themes') / NAME
 CONF = Path('/etc/sddm.conf.d/99-rezero-royal-capital.conf')
+LEGACY_CONF = Path('/etc/sddm.conf')
 BACKUPS = Path('/var/lib/sddm/theme-backups') / NAME
-SELECTION = '[Theme]\nCurrent=rezero-royal-capital\nThemeDir=/usr/share/sddm/themes\n'
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def validate_targets():
+    if DEST.is_symlink() or CONF.is_symlink():
+        raise RuntimeError('The installation target must not be a symlink.')
+    if DEST.exists() and not DEST.is_dir():
+        raise RuntimeError(f'The theme target must be a directory: {DEST}')
+    if CONF.exists() and not CONF.is_file():
+        raise RuntimeError(f'The selection target must be a file: {CONF}')
+
+
 def preflight():
     for required in ('Main.qml', 'metadata.desktop', 'theme.conf', 'assets/royal-capital.png'):
         if not (SOURCE / required).is_file():
             raise RuntimeError(f'Missing theme file: {required}')
-    if any(path.is_symlink() for path in SOURCE.rglob('*')):
+    if SOURCE.is_symlink() or any(path.is_symlink() for path in SOURCE.rglob('*')):
         raise RuntimeError('Theme source must contain regular files and directories, not symlinks.')
-    if DEST.is_symlink() or CONF.is_symlink():
-        raise RuntimeError('The installation target must not be a symlink.')
+    validate_targets()
     if not shutil.which('sddm-greeter-qt6'):
         raise RuntimeError('Install Qt 6 SDDM before installing this theme.')
     # SDDM reads the legacy file after all snippets. Refuse hidden overrides.
     later = [p for p in CONF.parent.glob('*.conf') if p.name > CONF.name]
-    later.append(Path('/etc/sddm.conf'))
+    later.append(LEGACY_CONF)
     for path in later:
         if not path.exists():
             continue
         config = configparser.RawConfigParser(strict=False)
-        config.read(path)
+        with path.open() as stream:
+            config.read_file(stream)
         for key, expected in (('Current', NAME), ('ThemeDir', str(DEST.parent))):
             value = config.get('Theme', key, fallback='').strip()
-            if value and value.rstrip('/') != expected:
+            if config.has_option('Theme', key) and value.rstrip('/') != expected:
                 raise RuntimeError(f'{path} overrides [Theme] {key}={value}. Resolve that override first.')
 
 
 def atomic_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.' + path.name, delete=False) as f:
-        f.write(text)
-        temporary = Path(f.name)
-    temporary.chmod(0o644)
-    os.replace(temporary, path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.' + path.name, delete=False) as f:
+            temporary = Path(f.name)
+            f.write(text)
+        temporary.chmod(0o644)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def install():
@@ -66,8 +80,8 @@ def install():
     # A full reference snapshot is retained, but rollback changes only our files.
     if CONF.parent.exists():
         shutil.copytree(CONF.parent, backup / 'sddm.conf.d-reference')
-    if Path('/etc/sddm.conf').exists():
-        shutil.copy2('/etc/sddm.conf', backup / 'sddm.conf-reference')
+    if LEGACY_CONF.exists():
+        shutil.copy2(LEGACY_CONF, backup / 'sddm.conf-reference')
     if CONF.exists():
         shutil.copy2(CONF, backup / 'selection.conf')
     DEST.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +101,7 @@ def install():
             moved_previous = True
         os.replace(staging, DEST)
         installed_new = True
-        atomic_text(CONF, SELECTION)
+        atomic_text(CONF, f'[Theme]\nCurrent={NAME}\nThemeDir={DEST.parent}\n')
         manifest = {**original, 'theme': str(DEST), 'selection': str(CONF), 'backup': str(backup)}
         atomic_text(backup / 'manifest.json', json.dumps(manifest, indent=2) + '\n')
         print(json.dumps({**manifest, 'selected': NAME, 'service_restarted': False}, indent=2))
@@ -107,6 +121,7 @@ def install():
 
 
 def restore(backup_path):
+    validate_targets()
     backup = Path(backup_path).resolve()
     if backup.parent != BACKUPS.resolve():
         raise RuntimeError(f'Choose an installation backup directly inside {BACKUPS}')
@@ -117,16 +132,38 @@ def restore(backup_path):
         raise RuntimeError('The original theme backup is missing.')
     if manifest['selection_existed'] and not (backup / 'selection.conf').is_file():
         raise RuntimeError('The original selection backup is missing.')
-    # Retain the removed copy in case an existing greeter still references it.
-    retained = backup / ('removed-theme-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
-    if DEST.exists():
-        shutil.move(str(DEST), str(retained))
-    if manifest['theme_existed']:
-        shutil.copytree(backup / 'theme', DEST)
-    if manifest['selection_existed']:
-        atomic_text(CONF, (backup / 'selection.conf').read_text())
-    else:
-        CONF.unlink(missing_ok=True)
+    # Prepare the old theme before touching the active installation, then put
+    # the current theme back if either replacement or selection writing fails.
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    retained = backup / ('removed-theme-' + stamp)
+    staging = None
+    moved_current = False
+    restored_theme = False
+    try:
+        if manifest['theme_existed']:
+            DEST.parent.mkdir(parents=True, exist_ok=True)
+            staging = Path(tempfile.mkdtemp(prefix='.' + NAME + '-restore-', dir=DEST.parent))
+            shutil.copytree(backup / 'theme', staging, dirs_exist_ok=True)
+        # Retain the removed copy in case an existing greeter still references it.
+        if DEST.exists():
+            shutil.move(str(DEST), str(retained))
+            moved_current = True
+        if staging is not None:
+            os.replace(staging, DEST)
+            restored_theme = True
+        if manifest['selection_existed']:
+            atomic_text(CONF, (backup / 'selection.conf').read_text())
+        else:
+            CONF.unlink(missing_ok=True)
+    except Exception:
+        if restored_theme and DEST.exists():
+            shutil.move(str(DEST), str(backup / ('failed-restore-' + stamp)))
+        if moved_current:
+            shutil.move(str(retained), str(DEST))
+        raise
+    finally:
+        if staging is not None and staging.exists():
+            shutil.rmtree(staging)
     print(json.dumps({'restored_from': str(backup), 'retained_theme': str(retained), 'service_restarted': False}, indent=2))
 
 

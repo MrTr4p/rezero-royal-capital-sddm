@@ -99,10 +99,12 @@ Pull changes, then rerun the installer. It replaces the installed `theme.conf`, 
 Restore the previous theme selection with that exact backup path:
 
 ```sh
-sudo python scripts/install.py --restore /var/lib/sddm/theme-backups/rezero-royal-capital/<timestamp>
+sudo python scripts/install.py --restore "/var/lib/sddm/theme-backups/rezero-royal-capital/<timestamp>"
 ```
 
 Rollback restores only this theme and its selection snippet, preserves other configuration, and retains the removed theme copy. Reboot when ready. If the graphical login is unavailable, switch to a TTY with **Ctrl+Alt+F3**, log in, and run the restore command there.
+
+If a restore fails while copying files or writing the selection, the installer keeps the current installation in place so you can address the error and retry.
 
 ## Development and verification
 
@@ -110,6 +112,8 @@ Rollback restores only this theme and its selection snippet, preserves other con
 ./preview/test.sh
 python scripts/test-install.py
 ```
+
+The installer suite needs only Python 3 and runs without administrator access. It performs real file operations in temporary directories, covering the complete bundled theme, file hashes and permissions, preflight conflicts, upgrades, backups, rollback, and simulated write/copy failures. It substitutes the SDDM executable lookup, so SDDM does not need to be installed for these tests. It never installs a system theme or restarts a service. [GitHub Actions runs this suite on every push and pull request](https://github.com/MrTr4p/rezero-royal-capital-sddm/actions/workflows/installer.yml).
 
 Native tests cover validation, password visibility, Enter/Escape, retries, session selection, duplicate submissions, mock power confirmations, three display sizes, and animation timing, rewind, and reduced motion. They use a fake authentication backend.
 
