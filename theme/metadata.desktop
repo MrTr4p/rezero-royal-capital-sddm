@@ -1,0 +1,11 @@
+[SddmGreeterTheme]
+Name=Re:Zero — Royal Capital
+Description=An animated ivory and lavender Re:Zero login theme.
+Author=Omar
+Type=sddm-theme
+Version=1.1.0
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=rezero-royal-capital
+Theme-API=2.0
+QtVersion=6

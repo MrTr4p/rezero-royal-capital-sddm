@@ -1,0 +1,10 @@
+runtime/
+preview/qt-preview
+preview/theme-tests
+validation/
+README.txt
+__pycache__/
+.env*
+node_modules/
+*.core
+core
